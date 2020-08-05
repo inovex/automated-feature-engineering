@@ -1,0 +1,143 @@
+#!/bin/bash
+
+# for running multiple runs in parallel
+# sudo nohup ./runner -f tpot -d synthetic -p 4 -n 10 > runner.out 2> runner.err < /dev/null &
+
+# initialize a semaphore for limiting parallel runs
+open_sem(){
+    mkfifo pipe-$$
+    exec 3<>pipe-$$
+    rm pipe-$$
+    local i=$1
+    for((;i>0;i--)); do
+        printf %s 000 >&3
+    done
+}
+
+# run the given command asynchronously and pop/push tokens
+run_with_lock(){
+    local x
+    # this read waits until there is something to read
+    read -u 3 -n 3 x && ((0==x)) || exit $x
+    (
+     ( "$@"; )
+    # push the return code of the command to the semaphore
+    printf '%.3d' $? >&3
+    )&
+}
+
+# !Contains references to seperate virtual enviroments per framework
+
+# AUTOFEAT
+run_autofeat(){
+  autofeat_own/venv/bin/python3 autofeat_wrapper.py --problem=regression --data="$1" --trainSize="$2" --feateng_steps="$3" --featsel_runs="$4" --folderID="$5" --nDataPoints="$6" 1>"logs/autofeat/stdout_${1}_${2}_${3}_${4}_ID${5}.txt" 2>"logs/autofeat/stderr_${1}_${2}_${3}_${4}_ID${5}.txt"
+}
+# AUTOSKLARN
+run_autosklearn(){
+    autosklearn_own/venv/bin/python3 autosklearn_wrapper.py --problem=regression --data="$1" --trainSize="$2" --model="$3" --time="$4" --folderID="$5" --nDataPoints="$6" 1>"logs/autosklearn/stdout_${1}_${3}_${2}_${4}_ID${5}.txt" 2>"logs/autosklearn/stderrt_${1}_${3}_${2}_${4}_ID${5}.txt"
+}
+
+#TPOT
+run_tpot(){
+    tpot_own/venv/bin/python3 tpot_wrapper.py --problem=regression --data="$1" --trainSize="$2" --model="$3" --time="$4" --generations="$5" --popSize="$6"  --folderID="$7" --nDataPoints="$8" 1>"logs/tpot/stdout_${1}_${3}_${2}_${5}_${6}_${4}_ID${7}.txt" 2>"logs/tpot/stderr_${1}_${3}_${2}_${5}_${6}_${4}_ID${7}.txt"
+}
+
+echo_parameters(){
+    echo "$@"
+}
+
+echo 'Reading input.'
+
+# Without data information
+while getopts :f:d:p:n: option
+do
+ case "${option}" in
+   # Only for specific framework
+   f) framework=${OPTARG};;
+   #Only for specific data
+   d) data=${OPTARG};;
+   # Number of parallel runs
+   p) parallel=${OPTARG};;
+   n) numberOfRuns=${OPTARG};;
+   ?) echo "Invalid option: $OPTARG"
+      exit 1 ;;
+ esac
+done
+
+# Or specialised input if no parameter provided
+if [ $OPTIND -eq 1 ]; then
+  read -p "Enter number of evaluations: " numberOfRuns
+  read -p "Enter number of parallel evaluations: " parallel
+
+  # User inputs
+  read -p "Enter Framework: " framework
+  read -p "Enter data name: " data
+  read -p "Enter trainSize: " trainSize
+  read -p "Enter data size (smaller then 1.Mio): " nDataPoints
+
+  if [ "$framework" == "autosklearn" ] || [ "$framework" = "tpot" ]; then
+    read -p "Single model? If yes type it: " models
+    read -p "Enter runtime: " time
+  fi
+
+  if [ "$framework" == "tpot" ]; then
+    read -p "Enter generations: " generations
+    read -p "Enter popSize: " popSize
+  fi
+
+  if [ "$framework" == "autofeat" ]; then
+    read -p "Enter feature engineering steps: " feng
+    read -p "Enter feature selection runs: " fsel
+  fi
+fi
+
+# runSpecifics
+numberOfRuns="${numberOfRuns:-1}"
+parallel="${parallel:-1}"
+
+# Set default values if not already set
+framework="${framework:-tpot autosklearn autofeat}"
+data="${data:-rossmann taxitrip synthetic}"
+trainSize="${trainSize:-0.7}"
+nDataPoints="${nDataPoints:-100000}"
+models="${models:-DecisionTree RandomForest LinearReg LassoLarsCV}"
+time="${time:-720}"
+# Tpot only
+generations="${generations:-1000}"
+popSize="${popSize:-50}"
+# Autofeat only
+# 100 steps means 1-3 and 1-5 steps
+feng="${feng:-100}"
+fsel="${fsel:-100}"
+
+
+mkdir -p logs/autofeat
+mkdir -p logs/autosklearn
+mkdir -p logs/tpot
+echo 'Starting tasks.'
+
+open_sem $parallel
+for ((i = 1; i<= numberOfRuns; i++)); do
+    for rundata in $data; do
+        for runframework in $framework; do
+            if [ "$runframework" == "autofeat" ]; then
+                run_with_lock run_autofeat $rundata $trainSize $feng $fsel $RANDOM $nDataPoints
+                #run_with_lock echo_parameters $runframework $rundata $trainSize $feng $fsel $RANDOM
+            else
+                for runmodel in $models; do
+                    if [ "$runframework" == "autosklearn" ]; then
+                        run_with_lock run_autosklearn $rundata $trainSize $runmodel $time $RANDOM $nDataPoints
+                        #run_with_lock echo_parameters $runframework $rundata $trainSize $runmodel $time $RANDOM
+                    elif [ "$runframework" == "tpot" ]; then
+                        run_with_lock run_tpot $rundata $trainSize $runmodel $time $generations $popSize $RANDOM $nDataPoints
+                        #run_with_lock echo_parameters $runframework $rundata $trainSize $runmodel $time $generations $popSize $RANDOM
+                    fi
+                done
+            fi
+        done
+    done
+done
+
+
+echo 'exit'
+exit

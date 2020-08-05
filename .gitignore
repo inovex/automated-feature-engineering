@@ -1,0 +1,15 @@
+.DS_Store
+.idea
+__pycache__
+venv*
+tmp
+runs
+nohup*
+logs
+# Contains credentials
+terraform/clouds.yaml
+terraform/userdata.yml
+# state files
+**/.terraform/*
+*.tfstate
+*.tfstate.*
